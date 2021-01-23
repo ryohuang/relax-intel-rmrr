@@ -6,9 +6,9 @@ name: CI
 on:
   # Triggers the workflow on push or pull request events but only for the master branch
   push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+    tags:
+    - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -18,19 +18,134 @@ jobs:
   # This workflow contains a single job called "build"
   build:
     # The type of runner that the job will run on
-    runs-on: ubuntu:20.04
+    runs-on: ubuntu-20.04
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+
       - uses: actions/checkout@v2
+        with:
+          repository: 'ryohuang/relax-intel-rmrr'
+          path: 'relax-intel-rmrr'
+      
+      - uses: pCYSl5EDgo/cat@master
+        id: revision
+        with:
+          path: ${{ github.workspace }}/relax-intel-rmrr/revision.txt
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - run: echo $REV
+        env:
+          REV: ${{ steps.revision.outputs.text }}    
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Check path
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          ls $GITHUB_WORKSPACE/relax-intel-rmrr
+
+       
+
+      - name: Clone proxmox kernel
+        run: |
+          cd $GITHUB_WORKSPACE
+          git clone git://git.proxmox.com/git/pve-kernel.git -b pve-kernel-5.4
+          ls $GITHUB_WORKSPACE
+
+      - name: Checkout revision 
+        run: |
+          echo $REV
+          cd $GITHUB_WORKSPACE/pve-kernel
+          git reset --hard $REV
+          ls $GITHUB_WORKSPACE
+        env:
+          REV: ${{ steps.revision.outputs.text }}    
+
+      - name: Prepare build tools
+        if: ${{ false }}
+        env:
+         DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo wget http://download.proxmox.com/debian/proxmox-ve-release-6.x.gpg -O /etc/apt/trusted.gpg.d/proxmox-ve-release-6.x.gpg
+          sudo chmod +r /etc/apt/trusted.gpg.d/proxmox-ve-release-6.x.gpg
+          sudo chmod a+w /etc/apt/sources.list
+          sudo -E echo "deb http://download.proxmox.com/debian/pve buster pve-no-subscription" >>/etc/apt/sources.list
+          sudo apt-get update 
+          sudo apt-get upgrade -y
+          sudo apt-get install -y git nano screen patch fakeroot build-essential \
+               devscripts libncurses5 libncurses5-dev libssl-dev bc flex bison libelf-dev \
+               libaudit-dev libgtk2.0-dev libperl-dev libslang2-dev asciidoc xmlto \
+               gnupg2 rsync lintian debhelper libdw-dev libnuma-dev sphinx-common \
+               asciidoc-base automake cpio dh-python file gcc kmod libiberty-dev \
+               libpve-common-perl libtool perl-modules python2-minimal sed tar zlib1g-dev \
+               dwarves \
+               lz4 awscli apt-utils
+          sudo apt-get clean 
+          sudo apt-get autoremove
+      
+
+      # Clean space...
+      - name: Space Cleanup
+        if: ${{ false }}
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo "Space before clean"
+          df -h
+          sudo rm -rf /swapfile /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc 
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          echo "Space after clean"
+          df -h
+
+      
+      - name: Patch rmrr and build
+        if: ${{ false }}
+        run: |
+          cd $GITHUB_WORKSPACE/pve-kernel
+          cp ../relax-intel-rmrr/patches/add-relaxable-rmrr-below-5_8.patch ./patches/kernel/CUSTOM-add-relaxable-rmrr.patch
+          patch -p1 < ../relax-intel-rmrr/patches/proxmox.patch
+          sed -i "s/python-minimal/python2-minimal/g" debian/control.in
+          make
+          echo "show files in GITHUB_WORKSPACE/pve-kernel"
+          pwd
+          ls ./
+          echo "move files"
+          mkdir release
+          mv *.deb ./release
+          ls ./release
+          cd $GITHUB_WORKSPACE/pve-kernel
+          zip -r pve-kernel.zip release/*
+      
+      - name: Fake output for test
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/pve-kernel/release
+          cd $GITHUB_WORKSPACE/pve-kernel/release
+          touch release1.txt
+          touch release2.txt
+          cd $GITHUB_WORKSPACE/pve-kernel
+          zip -r pve-kernel.zip release/*
+
+      - uses: actions/upload-artifact@v2
+        with:
+          name: pve-kernel-artifact
+          path: ${{ github.workspace }}/pve-kernel/pve-kernel.zip
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        id: upload-release-asset 
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
+          asset_path: ${{ github.workspace }}/pve-kernel/pve-kernel.zip
+          asset_name: pve-kernel.zip
+          asset_content_type: application/zip
